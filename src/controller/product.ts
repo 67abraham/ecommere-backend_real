@@ -278,8 +278,8 @@ export const uploadProductImage = async (req: Request, res: Response) => {
         const match = data.match(/^data:(image\/(?:jpeg|png|webp|gif));base64,([A-Za-z0-9+/]+={0,2})$/i);
         if (!match) return res.status(400).json({ message: "Only JPEG, PNG, WebP and GIF images are allowed" });
 
-        const declaredType = match[1].toLowerCase();
-        const body = Buffer.from(match[2], "base64");
+        const declaredType = match[1]?.toLowerCase();
+        const body = Buffer.from(match[2]!, "base64");
         if (!body.length || body.length > 5 * 1024 * 1024) {
             return res.status(400).json({ message: "Image must be between 1 byte and 5MB" });
         }
