@@ -20,8 +20,10 @@ const orderInclude = {
 
 export const createOrder = async (req: Request, res: Response) => {
   try {
-    const rawCartIds = Array.isArray(req.body.cartID) ? req.body.cartID : [];
-    const cartID = [...new Set(rawCartIds.filter((id: unknown): id is string => typeof id === "string" && id.trim()).map(id => id.trim()))];
+    const rawCartIds: unknown[] = Array.isArray(req.body.cartID) ? req.body.cartID : [];
+    const cartID: string[] = [...new Set(rawCartIds
+      .filter((id: unknown): id is string => typeof id === "string" && id.trim().length > 0)
+      .map((id: string) => id.trim()))];
     const shippingMethod = typeof req.body.shippingMethod === "string" && req.body.shippingMethod.trim()
       ? req.body.shippingMethod.trim().slice(0, 50)
       : "WHATSAPP";
