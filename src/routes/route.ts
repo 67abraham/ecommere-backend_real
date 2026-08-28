@@ -4,7 +4,7 @@ import { requireAuth } from '../middlerware/requireAuth';
 import { checkRole } from '../middlerware/checkRole';
 import { createProd, delProd, getProduct, getSingleProd, updateProdStatus, updateProduct, uploadProductImage, generateProductDescription } from '../controller/product';
 import { createCartItem, delCartItem, getCartItem, updateCartItem } from '../controller/cartItem';
-import { createOrder, getOrder, updateOrder } from '../controller/order';
+import { createOrder, getOrder, getOrderById, updateOrder } from '../controller/order';
 import { getBillingInfo, saveBillingInfo } from '../controller/billing';
 
 export const category = express.Router();
@@ -34,6 +34,7 @@ cartItem.delete("/del", requireAuth, checkRole(["ADMIN", "APP_USER"]), delCartIt
 
 order.post("/create", requireAuth, checkRole(["ADMIN", "APP_USER"]), createOrder)
 order.get("/", requireAuth, checkRole(["ADMIN", "APP_USER"]), getOrder)
+order.get("/:id", requireAuth, checkRole(["ADMIN", "APP_USER"]), getOrderById)
 order.put("/:id/status", requireAuth, checkRole(["ADMIN"]), updateOrder)
 
 billing.get("/", requireAuth, checkRole(["ADMIN", "APP_USER"]), getBillingInfo)

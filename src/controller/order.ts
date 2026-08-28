@@ -8,9 +8,11 @@ import { OrderStatus } from "../../generated/prisma/enums";
 
 const uid = (req: Request) => (req as any).user.id as string;
 const role = (req: Request) => (req as any).user.role as string;
+const SHIPPING_METHODS = ["Ship", "Flight"] as const;
 const generateCode = () => `ORD-${randomBytes(4).toString("hex").toUpperCase()}`;
 
 const orderInclude = {
+  user: { select: { name: true, email: true } },
   item: {
     include: {
       product: { select: { id: true, name: true, imageUrl: true, price: true, productLocation: true } },
@@ -20,15 +22,15 @@ const orderInclude = {
 
 export const createOrder = async (req: Request, res: Response) => {
   try {
-    const rawCartIds: unknown[] = Array.isArray(req.body.cartID) ? req.body.cartID : [];
-    const cartID: string[] = [...new Set(rawCartIds
+    const {cartID, shippingMethod} = req.body
+    const rawCartIds: unknown[] = Array.isArray(cartID) ? cartID : [];
+    const cartId: string[] = [...new Set(rawCartIds
       .filter((id: unknown): id is string => typeof id === "string" && id.trim().length > 0)
       .map((id: string) => id.trim()))];
-    const shippingMethod = typeof req.body.shippingMethod === "string" && req.body.shippingMethod.trim()
-      ? req.body.shippingMethod.trim().slice(0, 50)
-      : "WHATSAPP";
+    const shippingMeth = typeof shippingMethod === "string" ? shippingMethod.trim() : "";
 
-    if (cartID.length === 0) return res.status(400).json({ message: "No cart items found" });
+    if (cartId.length === 0) return res.status(400).json({ message: "No cart items found" });
+    if (!SHIPPING_METHODS.includes(shippingMeth as (typeof SHIPPING_METHODS)[number])) return res.status(400).json({ message: "Shipping method must be Ship or Flight" });
 
     const user = await prisma.user.findUnique({
       where: { id: uid(req) },
@@ -41,58 +43,66 @@ export const createOrder = async (req: Request, res: Response) => {
       return res.status(400).json({ message: "Please save your delivery information before placing an order" });
     }
 
-    const created = await prisma.$transaction(async tx => {
-      const items = await tx.cartItem.findMany({
-        where: { id: { in: cartID }, userId: user.id, ordered: false },
-        include: { product: true },
-      });
+    const created = await prisma.$transaction(async (tx) => {
+  const items = await tx.cartItem.findMany({
+    where: { id: { in: cartId }, userId: user.id, ordered: false },
+    include: { product: true },
+  });
 
-      if (items.length !== cartID.length) {
-        throw new Error("CART_ITEMS_INVALID");
-      }
-      if (items.some(item => item.product.status !== "AVAILABLE")) {
-        throw new Error("PRODUCT_UNAVAILABLE");
-      }
-      if (items.some(item => !Number.isInteger(item.quantity) || item.quantity < item.product.minimumOrder)) {
-        throw new Error("MINIMUM_ORDER_NOT_MET");
-      }
+  if (items.length !== cartId.length) {
+    throw new Error("CART_ITEMS_INVALID");
+  }
+  if (items.some(item => item.product.status !== "AVAILABLE")) {
+    throw new Error("PRODUCT_UNAVAILABLE");
+  }
+  if (items.some(item => !Number.isInteger(item.quantity) || item.quantity < item.product.minimumOrder)) {
+    throw new Error("MINIMUM_ORDER_NOT_MET");
+  }
 
-      const totalAmount = items.reduce(
-        (sum, item) => sum + item.product.price * item.quantity,
-        0,
-      );
-      if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
-        throw new Error("INVALID_ORDER_TOTAL");
-      }
+  const totalAmount = items.reduce(
+    (sum, item) => sum + item.product.price * item.quantity,
+    0,
+  );
+  if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
+    throw new Error("INVALID_ORDER_TOTAL");
+  }
 
-      // Claim the cart rows inside the transaction. This prevents two concurrent
-      // checkout requests from creating two orders from the same cart.
-      const claimed = await tx.cartItem.updateMany({
-        where: { id: { in: cartID }, userId: user.id, ordered: false },
-        data: { ordered: true },
-      });
-      if (claimed.count !== cartID.length) {
-        throw new Error("CART_ALREADY_ORDERED");
-      }
+  const claimed = await tx.cartItem.updateMany({
+    where: { id: { in: cartId }, userId: user.id, ordered: false },
+    data: { ordered: true },
+  });
+  if (claimed.count !== cartId.length) {
+    throw new Error("CART_ALREADY_ORDERED");
+  }
 
-      await Promise.all(items.map(item =>
-        tx.cartItem.update({
-          where: { id: item.id },
-          data: { unitPrice: item.product.price },
-        }),
-      ));
+  // Snapshot each item's unitPrice in a single Mongo bulkWrite round trip
+  // instead of N serialized tx.cartItem.update() calls.
+  const bulkResult: any = await tx.$runCommandRaw({
+    update: "CartItem",
+    updates: items.map(item => ({
+      q: { _id: { $oid: item.id } },
+      u: { $set: { unitPrice: item.product.price } },
+    })),
+    ordered: false,
+  });
+  if (bulkResult?.writeErrors?.length) {
+    throw new Error("UNIT_PRICE_SNAPSHOT_FAILED");
+  }
 
-      return tx.order.create({
-        data: {
-          orderNumber: generateCode(),
-          totalAmount,
-          userId: user.id,
-          shippingMethod,
-          item: { connect: items.map(item => ({ id: item.id })) },
-        },
-        include: orderInclude,
-      });
-    });
+  return tx.order.create({
+    data: {
+      orderNumber: generateCode(),
+      totalAmount,
+      userId: user.id,
+      shippingMethod: shippingMeth,
+      item: { connect: items.map(item => ({ id: item.id })) },
+    },
+    include: orderInclude,
+  });
+}, {
+  timeout: 15000,
+  maxWait: 5000,
+});
 
     broadcastMessage({ event: "order:created", data: { orderId: created.id } });
     if (user.email) {
@@ -113,6 +123,20 @@ export const createOrder = async (req: Request, res: Response) => {
     if (code === "CART_ALREADY_ORDERED") return res.status(409).json({ message: "Your cart changed while placing the order. Please review it and try again." });
     logger.error(`Error creating order: ${error}`);
     return res.status(500).json({ message: "Unable to create order" });
+  }
+};
+
+export const getOrderById = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params as { id: string };
+    if (!id || !/^[a-f\d]{24}$/i.test(id)) return res.status(400).json({ message: "Invalid order id" });
+    const where = role(req) === "ADMIN" ? { id } : { id, userId: uid(req) };
+    const order = await prisma.order.findFirst({ where, include: orderInclude });
+    if (!order) return res.status(404).json({ message: "Order not found" });
+    return res.status(200).json({ order });
+  } catch (error) {
+    logger.error(`Error getting order details: ${error}`);
+    return res.status(500).json({ message: "Unable to fetch order details" });
   }
 };
 

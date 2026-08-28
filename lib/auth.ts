@@ -34,6 +34,8 @@ export const auth = betterAuth({
             void sendEmail({ to: user.email, subject: "Reset your password", message: `Reset your password using this link: ${url}` }).catch(error => console.error(`Password reset email failed: ${error}`));
         }
     },
+
+    baseURL: process.env.CLIENT_ROUTE as string,
     
     socialProviders: { 
         google: { 
