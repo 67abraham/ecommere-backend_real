@@ -5,6 +5,7 @@ import { logger } from "../../lib/logger";
 import { broadcastMessage } from "../utility/websock";
 import { sendEmail } from "../../lib/sendEmail";
 import { OrderStatus } from "../../generated/prisma/enums";
+import { runTransactionWithRetry } from "../utility/runTransactionWithRetry";
 
 const uid = (req: Request) => (req as any).user.id as string;
 const role = (req: Request) => (req as any).user.role as string;
@@ -19,10 +20,11 @@ const orderInclude = {
     },
   },
 } as const;
+const MAX_CART_ITEMS_PER_ORDER = 100;
 
 export const createOrder = async (req: Request, res: Response) => {
   try {
-    const {cartID, shippingMethod} = req.body
+    const { cartID, shippingMethod } = req.body;
     const rawCartIds: unknown[] = Array.isArray(cartID) ? cartID : [];
     const cartId: string[] = [...new Set(rawCartIds
       .filter((id: unknown): id is string => typeof id === "string" && id.trim().length > 0)
@@ -30,12 +32,14 @@ export const createOrder = async (req: Request, res: Response) => {
     const shippingMeth = typeof shippingMethod === "string" ? shippingMethod.trim() : "";
 
     if (cartId.length === 0) return res.status(400).json({ message: "No cart items found" });
-    if (!SHIPPING_METHODS.includes(shippingMeth as (typeof SHIPPING_METHODS)[number])) return res.status(400).json({ message: "Shipping method must be Ship or Flight" });
+    if (cartId.length > MAX_CART_ITEMS_PER_ORDER) {
+      return res.status(400).json({ message: `A single order can include at most ${MAX_CART_ITEMS_PER_ORDER} items` });
+    }
+    if (!SHIPPING_METHODS.includes(shippingMeth as (typeof SHIPPING_METHODS)[number])) {
+      return res.status(400).json({ message: "Shipping method must be Ship or Flight" });
+    }
 
-    const user = await prisma.user.findUnique({
-      where: { id: uid(req) },
-      select: { id: true, email: true },
-    });
+    const user = await prisma.user.findUnique({ where: { id: uid(req) }, select: { id: true, email: true } });
     if (!user) return res.status(401).json({ message: "User account was not found" });
 
     const billing = await prisma.billingInfo.findUnique({ where: { userId: user.id } });
@@ -43,74 +47,61 @@ export const createOrder = async (req: Request, res: Response) => {
       return res.status(400).json({ message: "Please save your delivery information before placing an order" });
     }
 
-    const created = await prisma.$transaction(async (tx) => {
-  const items = await tx.cartItem.findMany({
-    where: { id: { in: cartId }, userId: user.id, ordered: false },
-    include: { product: true },
-  });
+    const created = await runTransactionWithRetry(async (tx) => {
+      const items = await tx.cartItem.findMany({
+        where: { id: { in: cartId }, userId: user.id, ordered: false },
+        include: { product: true },
+      });
 
-  if (items.length !== cartId.length) {
-    throw new Error("CART_ITEMS_INVALID");
-  }
-  if (items.some(item => item.product.status !== "AVAILABLE")) {
-    throw new Error("PRODUCT_UNAVAILABLE");
-  }
-  if (items.some(item => !Number.isInteger(item.quantity) || item.quantity < item.product.minimumOrder)) {
-    throw new Error("MINIMUM_ORDER_NOT_MET");
-  }
+      if (items.length !== cartId.length) throw new Error("CART_ITEMS_INVALID");
+      if (items.some(item => item.product.status !== "AVAILABLE")) throw new Error("PRODUCT_UNAVAILABLE");
+      if (items.some(item => !Number.isInteger(item.quantity) || item.quantity < item.product.minimumOrder)) {
+        throw new Error("MINIMUM_ORDER_NOT_MET");
+      }
 
-  const totalAmount = items.reduce(
-    (sum, item) => sum + item.product.price * item.quantity,
-    0,
-  );
-  if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
-    throw new Error("INVALID_ORDER_TOTAL");
-  }
+      const totalAmount = items.reduce((sum, item) => sum + item.product.price * item.quantity, 0);
+      if (!Number.isFinite(totalAmount) || totalAmount <= 0) throw new Error("INVALID_ORDER_TOTAL");
 
-  const claimed = await tx.cartItem.updateMany({
-    where: { id: { in: cartId }, userId: user.id, ordered: false },
-    data: { ordered: true },
-  });
-  if (claimed.count !== cartId.length) {
-    throw new Error("CART_ALREADY_ORDERED");
-  }
+      const claimed = await tx.cartItem.updateMany({
+        where: { id: { in: cartId }, userId: user.id, ordered: false },
+        data: { ordered: true },
+      });
+      if (claimed.count !== cartId.length) throw new Error("CART_ALREADY_ORDERED");
 
-  // Snapshot each item's unitPrice in a single Mongo bulkWrite round trip
-  // instead of N serialized tx.cartItem.update() calls.
-  const bulkResult: any = await tx.$runCommandRaw({
-    update: "CartItem",
-    updates: items.map(item => ({
-      q: { _id: { $oid: item.id } },
-      u: { $set: { unitPrice: item.product.price } },
-    })),
-    ordered: false,
-  });
-  if (bulkResult?.writeErrors?.length) {
-    throw new Error("UNIT_PRICE_SNAPSHOT_FAILED");
-  }
+      const bulkResult: any = await tx.$runCommandRaw({
+        update: "CartItem",
+        updates: items.map(item => ({
+          q: { _id: { $oid: item.id } },
+          u: { $set: { unitPrice: item.product.price } },
+        })),
+        ordered: false,
+      });
+      if (bulkResult?.writeErrors?.length) throw new Error("UNIT_PRICE_SNAPSHOT_FAILED");
 
-  return tx.order.create({
-    data: {
-      orderNumber: generateCode(),
-      totalAmount,
-      userId: user.id,
-      shippingMethod: shippingMeth,
-      item: { connect: items.map(item => ({ id: item.id })) },
-    },
-    include: orderInclude,
-  });
-}, {
-  timeout: 15000,
-  maxWait: 5000,
-});
+      return tx.order.create({
+        data: {
+          orderNumber: generateCode(),
+          totalAmount,
+          userId: user.id,
+          shippingMethod: shippingMeth,
+          item: { connect: items.map(item => ({ id: item.id })) },
+        },
+        include: orderInclude,
+      });
+    });
 
-    broadcastMessage({ event: "order:created", data: { orderId: created.id } });
+    try {
+      broadcastMessage({ event: "order:created", data: { orderId: created.id } });
+    } catch (broadcastError) {
+      logger.error(broadcastError, "Failed to broadcast order:created");
+    }
+
     if (user.email) {
       void sendEmail({
         to: user.email,
         subject: `Order ${created.orderNumber} received`,
         message: `Your order ${created.orderNumber} was created successfully. Total: ${created.totalAmount.toFixed(2)}. Current status: ${created.status}.`,
-      }).catch(error => logger.error(`Order email failed: ${error}`));
+      }).catch(error => logger.error(error, "Order email failed"));
     }
 
     return res.status(201).json({ message: "Order created", order: created });
@@ -121,7 +112,8 @@ export const createOrder = async (req: Request, res: Response) => {
     if (code === "MINIMUM_ORDER_NOT_MET") return res.status(400).json({ message: "One or more items do not meet the minimum order quantity" });
     if (code === "INVALID_ORDER_TOTAL") return res.status(400).json({ message: "Unable to calculate a valid order total" });
     if (code === "CART_ALREADY_ORDERED") return res.status(409).json({ message: "Your cart changed while placing the order. Please review it and try again." });
-    logger.error(`Error creating order: ${error}`);
+    if (code === "UNIT_PRICE_SNAPSHOT_FAILED") return res.status(500).json({ message: "Unable to finalize order pricing" });
+    logger.error(error, "Error creating order");
     return res.status(500).json({ message: "Unable to create order" });
   }
 };
@@ -163,15 +155,15 @@ export const getOrder = async (req: Request, res: Response) => {
 
 export const updateOrder = async (req: Request, res: Response) => {
   try {
+    if (role(req) !== "ADMIN") {
+      return res.status(403).json({ message: "Only administrators can update order status" });
+    }
     const { id } = req.params as { id: string };
     const rawStatus = typeof req.body?.status === "string" ? req.body.status : req.query.status;
     const status = rawStatus as OrderStatus;
     if (!id || !Object.values(OrderStatus).includes(status)) {
       return res.status(400).json({ message: "Invalid order status" });
     }
-
-    const current = await prisma.order.findUnique({ where: { id }, select: { status: true } });
-    if (!current) return res.status(404).json({ message: "Order not found" });
 
     const transitions: Record<OrderStatus, OrderStatus[]> = {
       PENDING: [OrderStatus.PREPARING, OrderStatus.CANCELLED],
@@ -181,28 +173,42 @@ export const updateOrder = async (req: Request, res: Response) => {
       DELIVERED: [],
       CANCELLED: [],
     };
-    if (!transitions[current.status].includes(status)) {
+    const allowedFromStatuses = (Object.keys(transitions) as OrderStatus[])
+      .filter(from => transitions[from].includes(status));
+
+    // Atomic compare-and-swap: the WHERE clause requires the order to still be
+    // in one of the valid source statuses at write time, so two concurrent
+    // requests can't both succeed off a stale read of "current status".
+    const { count } = await prisma.order.updateMany({
+      where: { id, status: { in: allowedFromStatuses } },
+      data: { status },
+    });
+
+    if (count === 0) {
+      const current = await prisma.order.findUnique({ where: { id }, select: { status: true } });
+      if (!current) return res.status(404).json({ message: "Order not found" });
       return res.status(409).json({ message: `Order cannot move from ${current.status} to ${status}` });
     }
 
-    const updated = await prisma.order.update({
-      where: { id },
-      data: { status },
-      include: orderInclude,
-    });
+    const updated = await prisma.order.findUnique({ where: { id }, include: orderInclude });
+    if (!updated) return res.status(404).json({ message: "Order not found" });
 
-    broadcastMessage({ event: "order:updated", data: { orderId: updated.id, status: updated.status } });
-    const owner = await prisma.user.findUnique({ where: { id: updated.userId }, select: { email: true } });
-    if (owner?.email) {
+    try {
+      broadcastMessage({ event: "order:updated", data: { orderId: updated.id, status: updated.status } });
+    } catch (broadcastError) {
+      logger.error(broadcastError, "Failed to broadcast order:updated");
+    }
+
+    if (updated.user?.email) {
       void sendEmail({
-        to: owner.email,
+        to: updated.user.email,
         subject: `Order ${updated.orderNumber} updated`,
         message: `Your order ${updated.orderNumber} is now ${updated.status}.`,
-      }).catch(error => logger.error(`Order status email failed: ${error}`));
+      }).catch(error => logger.error(error, "Order status email failed"));
     }
     return res.status(200).json(updated);
   } catch (error) {
-    logger.error(`Error updating order: ${error}`);
+    logger.error(error, "Error updating order");
     return res.status(500).json({ message: "Unable to update order" });
   }
 };

@@ -67,6 +67,7 @@ export const delCategory = async (req:Request, res:Response)=>{
         const {id} = req.params as {id:string}
         if (!isObjectId(id)) return res.status(400).json({ message: "Invalid category id" })
         
+            logger.info(id)
         const delCa = await prisma.category.delete({
             where: {id}
         })

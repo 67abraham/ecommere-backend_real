@@ -2,7 +2,7 @@ import type { Request, Response } from "express";
 import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
 import { broadcastMessage } from "../utility/websock";
-import { ProductStatus } from "../../generated/prisma/enums";
+import { OrderStatus, ProductStatus } from "../../generated/prisma/enums";
 import { auth } from "../../lib/auth";
 import { fromNodeHeaders } from "better-auth/node";
 import { createHash, createHmac, randomUUID } from "crypto";
@@ -186,7 +186,7 @@ export const getProduct = async(req:Request, res:Response)=>{
         const available = session?.user.role === "ADMIN" ? undefined : ProductStatus.AVAILABLE
 
         const where = {
-            status: available,
+            status: ProductStatus.AVAILABLE,
             ...(categoryId ? { categoryId } : {}),
             ...(search ? {
                 OR: [
