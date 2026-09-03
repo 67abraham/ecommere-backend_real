@@ -133,7 +133,7 @@ export const updateProdStatus = async (req: Request, res: Response) => {
 
         const existing = await prisma.product.findUnique({ where: { id }, select: { id: true, status: true } });
         if (!existing) return res.status(404).json({ message: "Product not found" });
-        if (existing.status === status) return res.status(200).json(existing);
+        // if (existing.status === status) return res.status(200).json(existing);
 
         const updated = await prisma.product.update({ where: { id }, data: { status } });
         broadcastMessage({ event: "product:status-updated", data: { id: updated.id, status: updated.status } });
@@ -186,7 +186,7 @@ export const getProduct = async(req:Request, res:Response)=>{
         const available = session?.user.role === "ADMIN" ? undefined : ProductStatus.AVAILABLE
 
         const where = {
-            status: ProductStatus.AVAILABLE,
+            status: available,
             ...(categoryId ? { categoryId } : {}),
             ...(search ? {
                 OR: [
