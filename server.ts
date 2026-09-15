@@ -20,7 +20,7 @@ const PORT = Number(process.env.PORT) || 8000
 initialWebsocket(server)
 //middleware
 app.use(cors({
-    origin:process.env.CLIENT_ROUTE || "http://localhost:5173",
+    origin:process.env.CLIENT_ROUTE as string,
     methods:["POST","GET", "PUT","DELETE"],
     credentials:true
 }))

@@ -133,7 +133,6 @@ export const updateProdStatus = async (req: Request, res: Response) => {
 
         const existing = await prisma.product.findUnique({ where: { id }, select: { id: true, status: true } });
         if (!existing) return res.status(404).json({ message: "Product not found" });
-        // if (existing.status === status) return res.status(200).json(existing);
 
         const updated = await prisma.product.update({ where: { id }, data: { status } });
         broadcastMessage({ event: "product:status-updated", data: { id: updated.id, status: updated.status } });
@@ -152,8 +151,7 @@ export const delProd =  async(req:Request, res:Response)=>{
         const existing = await prisma.product.findUnique({ where: { id }, select: { id: true } })
         if (!existing) return res.status(404).json({ message: "Product not found" })
 
-        // Products can be referenced by historical orders, so archive them instead of
-        // physically deleting the record and breaking order history.
+
         const archived = await prisma.product.update({
             where: { id },
             data: { status: ProductStatus.NOT_AVAILABLE }
