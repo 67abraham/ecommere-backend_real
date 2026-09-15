@@ -11,6 +11,8 @@ export const auth = betterAuth({
         
     }),
 
+    trustedOrigins:["https://square-trade-frontend.vercel.app"],
+    
     advanced:{
         database:{
             generateId: ()=>{

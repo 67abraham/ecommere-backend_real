@@ -354,7 +354,7 @@ export const generateProductDescription = async (req: Request, res: Response) =>
             headers: {
                 Authorization: `Bearer ${apiKey}`,
                 "Content-Type": "application/json",
-                "HTTP-Referer": process.env.CLIENT_ROUTE || "http://localhost:5173",
+                "HTTP-Referer": process.env.CLIENT_ROUTE || "https://ecommere-backend-real.onrender.com",
                 "X-Title": "Square Trade Sourcing",
             },
             body: JSON.stringify({
