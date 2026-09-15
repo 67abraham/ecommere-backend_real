@@ -18,8 +18,14 @@ export const auth = betterAuth({
             generateId: ()=>{
                 return crypto.randomBytes(12).toString("hex")
             }
+        },
+        useSecureCookies: true,
+        defaultCookieAttributes: {
+        sameSite: "none",
+        secure: true,
         }
     },
+
 
     account:{
         accountLinking:{
