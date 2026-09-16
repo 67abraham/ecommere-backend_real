@@ -37,7 +37,7 @@ export const auth = betterAuth({
     emailAndPassword:{
         enabled: true,
         autoSignIn: true,
-        requireEmailVerification: true,
+        requireEmailVerification: false,
         revokeSessionsOnPasswordReset: true,
         sendResetPassword: async ({ user, url }) => {
             void sendEmail({ to: user.email, subject: "Reset your password", message: `Reset your password using this link: ${url}` }).catch(error => console.error(`Password reset email failed: ${error}`));
